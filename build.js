@@ -1,6 +1,7 @@
 const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const ROOT = __dirname;
@@ -10,6 +11,7 @@ const NODE_MODULES_CACHE = path.join(ROOT, 'node_modules/.cache');
 const ENTRY_FILE = path.join(ROOT, 'src/index.js');
 const BUNDLED_JS = path.join(DIST, 'cyrus-daemon.bundle.js');
 const OUTPUT = path.join(DIST, 'cyrus-daemon');
+const SHA256_OUTPUT = path.join(DIST, 'cyrus-daemon.sha256');
 const SEA_CONFIG = path.join(DIST, 'sea-config.json');
 const SEA_BLOB = path.join(DIST, 'sea-prep.blob');
 
@@ -55,7 +57,7 @@ function run(command, args, options = {}) {
 }
 
 function nukeAllCaches() {
-    log('0/4', 'Purging all previous build artifacts and caches...');
+    log('0/5', 'Purging all previous build artifacts and caches...');
     if (fs.existsSync(DIST)) {
         fs.rmSync(DIST, { recursive: true, force: true });
     }
@@ -103,7 +105,7 @@ function checkEnvironment() {
 }
 
 async function bundleJavaScript() {
-    log('1/4', 'Bundling fresh source code with esbuild...');
+    log('1/5', 'Bundling fresh source code with esbuild...');
 
     const buildTimestamp = Date.now();
 
@@ -147,7 +149,7 @@ async function bundleJavaScript() {
 }
 
 async function buildSEA() {
-    log('2/4', 'Generating SEA blob (V8 Code Cache DISABLED)...');
+    log('2/5', 'Generating SEA blob (V8 Code Cache DISABLED)...');
     const config = {
         main: BUNDLED_JS,
         output: SEA_BLOB,
@@ -171,7 +173,7 @@ async function buildSEA() {
 }
 
 async function injectExecutable() {
-    log('3/4', 'Creating standalone binary with postject...');
+    log('3/5', 'Creating standalone binary with postject...');
 
     if (fs.existsSync(OUTPUT)) {
         fs.rmSync(OUTPUT, { force: true });
@@ -194,13 +196,26 @@ async function injectExecutable() {
 }
 
 async function finalizePermissions() {
-    log('4/4', 'Setting executable permissions...');
+    log('4/5', 'Setting executable permissions...');
 
     if (process.platform !== 'win32') {
         fs.chmodSync(OUTPUT, 0o755);
     }
 
     success('Permissions configured.');
+}
+
+async function generateChecksum() {
+    log('5/5', 'Generating SHA256 checksum file (cyrus-daemon.sha256)...');
+
+    const fileBuffer = fs.readFileSync(OUTPUT);
+    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex').toLowerCase();
+
+    const checksumContent = `${hash}  cyrus-daemon\n`;
+    fs.writeFileSync(SHA256_OUTPUT, checksumContent, 'utf8');
+
+    success(`SHA256 checksum file generated: ${path.relative(ROOT, SHA256_OUTPUT)}`);
+    return hash;
 }
 
 async function bundle() {
@@ -222,6 +237,7 @@ async function bundle() {
         await buildSEA();
         await injectExecutable();
         await finalizePermissions();
+        const hash = await generateChecksum();
 
         cleanupTempFiles();
 
@@ -231,6 +247,8 @@ async function bundle() {
         success('Build complete with zero caching!');
         console.log('');
         console.log(`  ${C_CYAN}Binary Path :${C_RESET} ${OUTPUT}`);
+        console.log(`  ${C_CYAN}SHA256 File :${C_RESET} ${SHA256_OUTPUT}`);
+        console.log(`  ${C_CYAN}SHA256 Hash :${C_RESET} ${hash}`);
         console.log(`  ${C_CYAN}File Size   :${C_RESET} ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
         console.log(`  ${C_CYAN}Executable  :${C_RESET} chmod +x confirmed`);
         console.log('');
