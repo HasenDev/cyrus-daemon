@@ -1,6 +1,6 @@
 const https = require('https');
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const REPO = 'HasenDev/cyrus-daemon';
 const GITHUB_API_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 const DOWNLOAD_URL = `https://github.com/${REPO}/releases/latest/download/cyrus-daemon`;
