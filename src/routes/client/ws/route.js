@@ -96,7 +96,7 @@ async function handlePowerSignal(serverId, action, daemonConfig) {
         const detailsEndpoint = `${panelUrl}/api/v1/daemon/servers/${serverId}/details`;
 
         const isHttps = detailsEndpoint.startsWith('https');
-        const agent = isHttps ? new https.Agent({ rejectUnauthorized: true }) : new http.Agent();
+        const agent = isHttps ? new https.Agent({ rejectUnauthorized: false }) : new http.Agent();
 
         const specRes = await fetch(detailsEndpoint, {
             headers: { 'Authorization': `Bearer ${daemonConfig.token}` },
@@ -331,21 +331,6 @@ async function clientWsRoute(ws, req, daemonConfig) {
 
     let authenticatedUserId = null;
 
-    let tokenClaims = {};
-    try {
-        const parts = token.split('.');
-        if (parts.length === 3) {
-            tokenClaims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-        }
-    } catch (_) {
-        try {
-            const parts = token.split('.');
-            if (parts.length === 3) {
-                tokenClaims = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-            }
-        } catch (_) {}
-    }
-
     try {
         const verifyData = await verifyWsToken(daemonConfig.panelUrl || daemonConfig.panel_url, daemonConfig.token, token, serverId);
         if (!verifyData.valid) {
@@ -367,23 +352,10 @@ async function clientWsRoute(ws, req, daemonConfig) {
             return ws.close(4003, 'Invalid Token');
         }
 
-        authenticatedUserId = verifyData.userId || tokenClaims.userId;
+        authenticatedUserId = verifyData.userId;
 
-        if (typeof verifyData.canConsole === 'boolean') {
-            ws.canConsole = verifyData.canConsole;
-        } else if (typeof tokenClaims.canConsole === 'boolean') {
-            ws.canConsole = tokenClaims.canConsole;
-        } else {
-            ws.canConsole = true;
-        }
-
-        if (typeof verifyData.canPower === 'boolean') {
-            ws.canPower = verifyData.canPower;
-        } else if (typeof tokenClaims.canPower === 'boolean') {
-            ws.canPower = tokenClaims.canPower;
-        } else {
-            ws.canPower = true;
-        }
+        ws.canConsole = verifyData.canConsole === true;
+        ws.canPower = verifyData.canPower === true;
     } catch (err) {
         if (ws.readyState === 1) {
             ws.send(JSON.stringify({ 
