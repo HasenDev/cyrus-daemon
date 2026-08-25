@@ -5,7 +5,16 @@ const { resolveSafePath, getMimeType } = require('../../../../../lib/files');
 
 module.exports = {
     GET: async (req, reply) => {
-        const token = req.query.token;
+        const authHeader = req.headers.authorization || req.headers.Authorization;
+        let token = authHeader;
+        if (token && token.startsWith('Bearer ')) {
+            token = token.slice(7);
+        }
+
+        if (!token) {
+            token = req.query?.token;
+        }
+
         if (!token) return reply.status(401).send({ error: 'Missing download token.' });
 
         const daemonConfig = req.server.daemonConfig;
