@@ -5,6 +5,8 @@ const logger = require('../lib/logger');
 const configManager = require('../lib/config');
 const createDaemonServer = require('../server');
 const { startSyncCron, stopSyncCron } = require('../lib/syncCron');
+const daemonInfo = require('../lib/daemonInformation');
+
 function verifyDockerSocket(socketPath = '/var/run/docker.sock') {
     return new Promise((resolve) => {
         if (process.platform !== 'win32' && !fs.existsSync(socketPath)) {
@@ -41,6 +43,17 @@ function verifyDockerSocket(socketPath = '/var/run/docker.sock') {
 
 async function startCommand() {
     logger.printBanner();
+    daemonInfo.checkForUpdates().then((update) => {
+        if (update && update.hasUpdate) {
+            console.log('');
+            logger.warn('═════════════════════════════════════════════════════════════════');
+            logger.warn(` An update is available: ${logger.bold(`v${update.latestVersion}`)} (Current: v${update.currentVersion})`);
+            logger.warn(` Run ${logger.accent('cyrus-daemon update')} to automatically update the daemon.`);
+            logger.warn('═════════════════════════════════════════════════════════════════');
+            console.log('');
+        }
+    }).catch(() => {});
+
     logger.info('Loading daemon configuration...');
     let config;
     try {
@@ -50,6 +63,7 @@ async function startCommand() {
         logger.error(`Failed to load configuration: ${err.message}`);
         process.exit(1);
     }
+
     const dataDir = config.storage?.path || config.system?.data_dir || '/var/lib/cyruspanel/volumes';
     try {
         if (!fs.existsSync(dataDir)) {
@@ -61,6 +75,7 @@ async function startCommand() {
         logger.error(`Storage directory (${dataDir}) is not accessible/writable: ${err.message}`);
         process.exit(1);
     }
+
     const dockerSocket = config.docker?.socket || '/var/run/docker.sock';
     logger.info('Checking Docker daemon status...');
     const dockerStatus = await verifyDockerSocket(dockerSocket);
@@ -70,6 +85,7 @@ async function startCommand() {
         process.exit(1);
     }
     logger.success('Docker daemon is responsive.');
+
     let server;
     try {
         server = await createDaemonServer(config);
@@ -86,6 +102,7 @@ async function startCommand() {
         }
         process.exit(1);
     }
+
     try {
         if (typeof startSyncCron === 'function') {
             startSyncCron(config);
@@ -96,17 +113,38 @@ async function startCommand() {
     }
 
     logger.info('Daemon is active and ready for container operations.');
+
+    let isShuttingDown = false;
+
     const shutdown = async (signal) => {
+        if (isShuttingDown) {
+            logger.warn('Forcing immediate shutdown...');
+            process.exit(1);
+        }
+        isShuttingDown = true;
+
         logger.info(`\nReceived ${signal}. Shutting down gracefully...`);
+        const forceExitTimer = setTimeout(() => {
+            logger.warn('Graceful shutdown timed out after 3s. Force terminating process.');
+            process.exit(0);
+        }, 3000);
+        forceExitTimer.unref();
+
         try {
             if (typeof stopSyncCron === 'function') {
                 stopSyncCron();
             }
+
             if (server) {
                 if (typeof server.close === 'function') {
-                    await server.close();
+                    await Promise.race([
+                        server.close(),
+                        new Promise((resolve) => setTimeout(resolve, 2000))
+                    ]);
                 }
             }
+
+            clearTimeout(forceExitTimer);
             logger.success('Daemon stopped cleanly.');
             process.exit(0);
         } catch (err) {
