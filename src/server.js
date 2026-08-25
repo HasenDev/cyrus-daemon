@@ -27,7 +27,7 @@ async function createDaemonServer(config) {
     await app.register(require('@fastify/multipart'), {
         limits: {
             fileSize: 1024 * 1024 * 1024,
-            files: 50
+            files: 1
         }
     });
 
