@@ -1,3 +1,5 @@
+const daemonInfo = require('./daemonInformation');
+
 const ACCENT = '\x1b[38;2;11;141;168m';
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -16,7 +18,7 @@ ${ACCENT}${BOLD}   ____                       ____
  | |__| |_| | |  | |_| \\__ \\ | |_| | (_| |  __/ | | | | | (_) | | | |
   \\____\\__, |_|   \\__,_|___/ |____/ \\__,_|\\___|_| |_| |_|\\___/|_| |_|
        |___/                                                         ${RESET}
-${DIM}               CyrusPanel Node Container Daemon v1.0.0${RESET}
+${DIM}               CyrusPanel Node Container Daemon v${daemonInfo.VERSION}${RESET}
 `;
     console.log(banner);
 }
