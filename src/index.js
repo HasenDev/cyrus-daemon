@@ -4,6 +4,7 @@ const logger = require('./lib/logger');
 const configureCommand = require('./commands/configure');
 const startCommand = require('./commands/start');
 const diagnosticsCommand = require('./commands/diagnostics');
+const updateCommand = require('./commands/update');
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -19,12 +20,16 @@ async function main() {
         case 'diagnostics':
             await diagnosticsCommand();
             break;
+        case 'update':
+            await updateCommand(args.slice(1));
+            break;
         default:
             logger.printBanner();
             console.log(`Usage:
   cyrus-daemon ${logger.accent('configure')} --panel-url <URL> --token <TOKEN>   Auto-configure node daemon
   cyrus-daemon ${logger.accent('start')}                                          Start the node daemon
   cyrus-daemon ${logger.accent('diagnostics')}                                    Run environment diagnostic checks
+  cyrus-daemon ${logger.accent('update')} [--force]                               Update daemon to the latest release
 `);
             break;
     }
