@@ -47,6 +47,11 @@ async function createDaemonServer(config) {
         allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
     });
 
+    await app.register(require('@fastify/rate-limit'), {
+        max: 100,
+        timeWindow: '1 minute'
+    });
+
     await app.register(require('@fastify/multipart'), {
         limits: {
             fileSize: 1024 * 1024 * 1024,
