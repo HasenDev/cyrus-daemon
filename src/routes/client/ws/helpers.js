@@ -69,7 +69,7 @@ async function verifyWsToken(panelUrl, daemonToken, token, serverId) {
         };
 
         if (isHttps) {
-            fetchOptions.agent = new https.Agent({ rejectUnauthorized: false });
+            fetchOptions.agent = new https.Agent({ rejectUnauthorized: true });
         }
 
         const verifyRes = await fetch(verifyEndpoint, fetchOptions);
