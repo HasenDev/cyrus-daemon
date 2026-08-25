@@ -23,7 +23,30 @@ async function createDaemonServer(config) {
 
     const app = fastify(fastifyOpts);
 
-    await app.register(require('@fastify/cors'), { origin: true });
+    const rawPanelUrl = config.panel_url || config.panelUrl || config.panel?.url || '';
+    const allowedOrigin = rawPanelUrl ? rawPanelUrl.trim().replace(/\/+$/, '') : null;
+
+    await app.register(require('@fastify/cors'), {
+        origin: (origin, cb) => {
+            if (!origin) {
+                return cb(null, true);
+            }
+
+            if (allowedOrigin) {
+                const cleanOrigin = origin.trim().replace(/\/+$/, '');
+                if (cleanOrigin === allowedOrigin) {
+                    return cb(null, true);
+                }
+                return cb(new Error('CORS request rejected: Origin not allowed.'), false);
+            }
+
+            return cb(new Error('CORS request rejected: Panel URL not configured.'), false);
+        },
+        credentials: true,
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
+    });
+
     await app.register(require('@fastify/multipart'), {
         limits: {
             fileSize: 1024 * 1024 * 1024,
