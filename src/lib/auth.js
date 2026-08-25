@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 function createAuthMiddleware(validToken) {
     return async function authenticate(req, reply) {
         const authHeader = req.headers.authorization;
@@ -11,7 +13,14 @@ function createAuthMiddleware(validToken) {
             token = token.slice(7);
         }
 
-        if (token !== validToken) {
+        if (!validToken || typeof token !== 'string') {
+            return reply.status(403).send({ error: 'Forbidden: Invalid daemon key token.' });
+        }
+
+        const tokenHash = crypto.createHash('sha256').update(token).digest();
+        const validTokenHash = crypto.createHash('sha256').update(String(validToken)).digest();
+
+        if (!crypto.timingSafeEqual(tokenHash, validTokenHash)) {
             return reply.status(403).send({ error: 'Forbidden: Invalid daemon key token.' });
         }
     };
