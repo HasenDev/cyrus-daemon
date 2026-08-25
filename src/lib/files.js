@@ -1,25 +1,78 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const resolvePath = require('resolve-path');
+const mime = require('mime-types');
 
-const VOLUMES_ROOT = '/var/lib/cyruspanel/volumes';
+const VOLUMES_ROOT = path.resolve('/var/lib/cyruspanel/volumes');
 
-function resolveSafePath(serverId, relativePath = '/') {
-    const serverRoot = path.resolve(VOLUMES_ROOT, serverId);
-    
-    if (!fs.existsSync(serverRoot)) {
-        fs.mkdirSync(serverRoot, { recursive: true, mode: 0o777 });
-        try { fs.chmodSync(serverRoot, 0o777); } catch (_) {}
+function verifyNoSymlinks(serverRoot, targetPath) {
+    const rel = path.relative(serverRoot, targetPath);
+    const parts = rel ? rel.split(path.sep).filter(Boolean) : [];
+    let current = serverRoot;
+
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error('Access denied: Symbolic links are not permitted.');
     }
 
-    const cleanRelative = path.normalize(relativePath || '/').replace(/^(\.\.(\/|\\|$))+/, '');
-    const targetPath = path.resolve(serverRoot, '.' + path.sep + cleanRelative);
+    for (const part of parts) {
+        current = path.join(current, part);
+        try {
+            const stat = fs.lstatSync(current);
+            if (stat.isSymbolicLink()) {
+                throw new Error('Access denied: Symbolic links are not permitted.');
+            }
+        } catch (err) {
+            if (err.code === 'ENOENT') {
+                break;
+            }
+            throw err;
+        }
+    }
+}
 
-    if (!targetPath.startsWith(serverRoot)) {
+function resolveSafePath(serverId, relativePath = '/') {
+    if (!serverId || typeof serverId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(serverId)) {
+        throw new Error('Access denied: Invalid server identifier.');
+    }
+
+    const realVolumesRoot = fs.existsSync(VOLUMES_ROOT) ? fs.realpathSync(VOLUMES_ROOT) : VOLUMES_ROOT;
+    const serverRoot = resolvePath(realVolumesRoot, serverId);
+
+    if (!serverRoot.startsWith(realVolumesRoot + path.sep)) {
+        throw new Error('Access denied: Invalid containment root.');
+    }
+
+    if (!fs.existsSync(serverRoot)) {
+        fs.mkdirSync(serverRoot, { recursive: true, mode: 0o755 });
+        try { fs.chmodSync(serverRoot, 0o755); } catch (_) {}
+    }
+
+    if (fs.lstatSync(serverRoot).isSymbolicLink()) {
+        throw new Error('Access denied: Symbolic links are not permitted.');
+    }
+
+    const realServerRoot = fs.realpathSync(serverRoot);
+    if (realServerRoot !== serverRoot && !realServerRoot.startsWith(realVolumesRoot + path.sep)) {
+        throw new Error('Access denied: Server root containment violation.');
+    }
+
+    const cleanRelative = path.normalize(String(relativePath || '/'))
+        .replace(/^(\.\.(\/|\\|$))+/, '')
+        .replace(/^[/\\]+/, '') || '.';
+
+    const targetPath = resolvePath(realServerRoot, cleanRelative);
+
+    if (targetPath !== realServerRoot && !targetPath.startsWith(realServerRoot + path.sep)) {
         throw new Error('Access denied: Path escapes server containment root.');
     }
 
-    return { serverRoot, targetPath, cleanRelative };
+    verifyNoSymlinks(realServerRoot, targetPath);
+
+    return { 
+        serverRoot: realServerRoot, 
+        targetPath, 
+        cleanRelative: cleanRelative === '.' ? '/' : '/' + cleanRelative 
+    };
 }
 
 function getFilePermissions(mode) {
@@ -27,33 +80,7 @@ function getFilePermissions(mode) {
 }
 
 function getMimeType(fileName) {
-    const ext = path.extname(fileName).toLowerCase();
-    const map = {
-        '.txt': 'text/plain',
-        '.json': 'application/json',
-        '.js': 'application/javascript',
-        '.ts': 'application/typescript',
-        '.py': 'text/x-python',
-        '.html': 'text/html',
-        '.css': 'text/css',
-        '.yml': 'text/yaml',
-        '.yaml': 'text/yaml',
-        '.properties': 'text/plain',
-        '.toml': 'text/plain',
-        '.env': 'text/plain',
-        '.sh': 'application/x-sh',
-        '.zip': 'application/zip',
-        '.tar': 'application/x-tar',
-        '.gz': 'application/gzip',
-        '.tgz': 'application/gzip',
-        '.jar': 'application/java-archive',
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml'
-    };
-    return map[ext] || 'application/octet-stream';
+    return mime.lookup(fileName) || 'application/octet-stream';
 }
 
 function isArchiveFile(fileName) {
