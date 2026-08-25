@@ -17,37 +17,170 @@ function getDirUsage(dir) {
     }
 }
 
-function getZipUncompressedSize(file) {
+function inspectZipArchive(file) {
+    let out = '';
     try {
-        const out = execFileSync('unzip', ['-l', file], { encoding: 'utf8', stdio: 'pipe' });
-        const lines = out.trim().split('\n');
-        if (lines.length > 0) {
-            const lastLine = lines[lines.length - 1].trim();
-            const match = lastLine.split(/\s+/);
-            if (match.length >= 1 && /^\d+$/.test(match[0])) {
-                return parseInt(match[0], 10);
+        out = execFileSync('unzip', ['-Z', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    } catch {
+        out = execFileSync('unzip', ['-l', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    }
+
+    const lines = out.split('\n');
+    let totalSize = 0;
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('Archive:') || line.startsWith('Zip file size:')) continue;
+
+        if (line.includes('files,') && line.includes('uncompressed')) {
+            const match = line.match(/(\d+)\s+bytes uncompressed/);
+            if (match && match[1]) {
+                const parsed = parseInt(match[1], 10);
+                if (parsed > 0) totalSize = parsed;
+            }
+            continue;
+        }
+
+        const parts = line.split(/\s+/);
+        if (parts.length >= 8 && /^[ld\-?cbps][rwx\-stST]{9}/.test(parts[0])) {
+            const isSymlink = parts[0].startsWith('l');
+            const sizeStr = parts[3];
+            if (/^\d+$/.test(sizeStr)) {
+                totalSize += parseInt(sizeStr, 10);
+            }
+
+            let entryPath = '';
+            let linkTarget = null;
+
+            const remainingText = parts.slice(7).join(' ');
+            if (remainingText.includes(' -> ')) {
+                const split = remainingText.split(' -> ');
+                entryPath = split[0].trim();
+                linkTarget = split[1]?.trim();
+            } else {
+                entryPath = remainingText;
+            }
+
+            if (entryPath) {
+                const normalized = path.posix.normalize(entryPath.replace(/\\/g, '/'));
+                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized)) {
+                    throw new Error(`Unsafe entry path in archive: ${entryPath}`);
+                }
+            }
+
+            if (isSymlink && linkTarget) {
+                const normalizedTarget = path.posix.normalize(linkTarget.replace(/\\/g, '/'));
+                if (normalizedTarget.startsWith('..') || normalizedTarget.startsWith('/') || path.isAbsolute(normalizedTarget)) {
+                    throw new Error(`Unsafe symlink target in archive: ${linkTarget}`);
+                }
+            }
+        } else if (parts.length >= 4 && /^\d+$/.test(parts[0])) {
+            const sizeStr = parts[0];
+            totalSize += parseInt(sizeStr, 10);
+            const entryPath = parts.slice(3).join(' ');
+            if (entryPath) {
+                const normalized = path.posix.normalize(entryPath.replace(/\\/g, '/'));
+                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized)) {
+                    throw new Error(`Unsafe entry path in archive: ${entryPath}`);
+                }
             }
         }
-        return 0;
-    } catch {
-        return 0;
     }
+
+    return totalSize;
 }
 
-function getTarUncompressedSize(file) {
-    try {
-        const out = execFileSync('tar', ['-tvf', file], { encoding: 'utf8', stdio: 'pipe' });
-        let total = 0;
-        out.trim().split('\n').forEach(line => {
-            const parts = line.trim().split(/\s+/);
-            if (parts.length >= 3 && /^\d+$/.test(parts[2])) {
-                total += parseInt(parts[2], 10);
+function inspectTarArchive(file) {
+    const out = execFileSync('tar', ['-tvf', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    let totalSize = 0;
+    const lines = out.split('\n');
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        const parts = line.split(/\s+/);
+        if (parts.length >= 6) {
+            const sizeStr = parts[2];
+            if (/^\d+$/.test(sizeStr)) {
+                totalSize += parseInt(sizeStr, 10);
             }
-        });
-        return total;
-    } catch {
-        return 0;
+        }
+
+        let entryPath = '';
+        let linkTarget = null;
+
+        if (line.includes(' -> ')) {
+            const split = line.split(' -> ');
+            linkTarget = split[1]?.trim();
+            const leftParts = split[0].trim().split(/\s+/);
+            entryPath = leftParts.slice(5).join(' ');
+        } else if (line.includes(' link to ')) {
+            const split = line.split(' link to ');
+            linkTarget = split[1]?.trim();
+            const leftParts = split[0].trim().split(/\s+/);
+            entryPath = leftParts.slice(5).join(' ');
+        } else {
+            const splitParts = parts.slice(5);
+            entryPath = splitParts.join(' ');
+        }
+
+        if (entryPath) {
+            const normalized = path.posix.normalize(entryPath.replace(/\\/g, '/'));
+            if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized)) {
+                throw new Error(`Unsafe entry path in archive: ${entryPath}`);
+            }
+        }
+
+        if (linkTarget) {
+            const normalizedTarget = path.posix.normalize(linkTarget.replace(/\\/g, '/'));
+            if (normalizedTarget.startsWith('..') || normalizedTarget.startsWith('/') || path.isAbsolute(normalizedTarget)) {
+                throw new Error(`Unsafe symlink target in archive: ${linkTarget}`);
+            }
+        }
     }
+
+    return totalSize;
+}
+
+function sanitizeExtractedSymlinks(baseDir) {
+    const resolvedBase = path.resolve(baseDir);
+
+    function walk(currentDir) {
+        let entries;
+        try {
+            entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+
+        for (const entry of entries) {
+            const fullPath = path.join(currentDir, entry.name);
+            try {
+                const lstat = fs.lstatSync(fullPath);
+
+                if (lstat.isSymbolicLink()) {
+                    let linkTarget;
+                    try {
+                        linkTarget = fs.readlinkSync(fullPath);
+                    } catch {
+                        fs.unlinkSync(fullPath);
+                        continue;
+                    }
+
+                    const resolvedTarget = path.resolve(currentDir, linkTarget);
+
+                    if (!resolvedTarget.startsWith(resolvedBase + path.sep) && resolvedTarget !== resolvedBase) {
+                        fs.unlinkSync(fullPath);
+                    }
+                } else if (lstat.isDirectory()) {
+                    walk(fullPath);
+                }
+            } catch (_) {}
+        }
+    }
+
+    walk(resolvedBase);
 }
 
 module.exports = {
@@ -176,6 +309,7 @@ module.exports = {
                 }
 
                 for (const fileName of files) {
+                    if (typeof fileName !== 'string' || !fileName) continue;
                     const { targetPath } = resolveSafePath(serverId, path.join(root, fileName));
                     if (fs.existsSync(targetPath)) {
                         fs.rmSync(targetPath, { recursive: true, force: true });
@@ -244,13 +378,44 @@ module.exports = {
                     return reply.status(400).send({ error: 'Files array is required to archive.' });
                 }
 
+                if (typeof name !== 'string' || !name || name.startsWith('-')) {
+                    return reply.status(400).send({ error: 'Invalid archive name.' });
+                }
+
                 checkSpace(0);
 
                 const { targetPath: destArchivePath } = resolveSafePath(serverId, path.join(root, name));
-                const workingDir = resolveSafePath(serverId, root).targetPath;
+                const { targetPath: workingDir } = resolveSafePath(serverId, root);
+
+                if (!fs.existsSync(workingDir)) {
+                    return reply.status(404).send({ error: 'Directory does not exist.' });
+                }
+
+                const safeFiles = [];
+                for (const item of files) {
+                    if (typeof item !== 'string' || !item.trim() || item.startsWith('-')) {
+                        return reply.status(400).send({ error: `Invalid file name: ${item}` });
+                    }
+
+                    const { targetPath } = resolveSafePath(serverId, path.join(root, item));
+                    if (!fs.existsSync(targetPath)) {
+                        return reply.status(404).send({ error: `File or folder not found: ${item}` });
+                    }
+
+                    const rel = path.relative(workingDir, targetPath);
+                    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+                        return reply.status(400).send({ error: `Invalid file path: ${item}` });
+                    }
+
+                    safeFiles.push(rel);
+                }
+
+                if (safeFiles.length === 0) {
+                    return reply.status(400).send({ error: 'No valid files selected for archiving.' });
+                }
 
                 await new Promise((resolve, reject) => {
-                    const tarProc = spawn('tar', ['-czf', destArchivePath, ...files], { cwd: workingDir });
+                    const tarProc = spawn('tar', ['-czf', destArchivePath, '--', ...safeFiles], { cwd: workingDir });
                     tarProc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Tar exited with code ${code}`))));
                     tarProc.on('error', reject);
                 });
@@ -266,30 +431,36 @@ module.exports = {
                 const { targetPath: destDir } = resolveSafePath(serverId, root);
 
                 if (!fs.existsSync(archivePath)) return reply.status(404).send({ error: 'Archive file not found.' });
+                if (!fs.existsSync(destDir)) return reply.status(404).send({ error: 'Destination directory does not exist.' });
 
                 const ext = path.extname(file).toLowerCase();
                 let uncompressedSize = 0;
                 
-                if (ext === '.zip') uncompressedSize = getZipUncompressedSize(archivePath);
-                else uncompressedSize = getTarUncompressedSize(archivePath);
+                if (ext === '.zip') {
+                    uncompressedSize = inspectZipArchive(archivePath);
+                } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
+                    uncompressedSize = inspectTarArchive(archivePath);
+                } else {
+                    return reply.status(400).send({ error: 'Unsupported archive format.' });
+                }
                 
                 checkSpace(uncompressedSize);
 
                 if (ext === '.zip') {
                     await new Promise((resolve, reject) => {
-                        const proc = spawn('unzip', ['-o', archivePath, '-d', destDir]);
+                        const proc = spawn('unzip', ['-o', '-q', archivePath, '-d', destDir]);
                         proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Unzip exited with code ${code}`))));
                         proc.on('error', reject);
                     });
                 } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
                     await new Promise((resolve, reject) => {
-                        const proc = spawn('tar', ['-xf', archivePath, '-C', destDir]);
+                        const proc = spawn('tar', ['-xf', archivePath, '--no-same-owner', '--no-same-permissions', '-C', destDir]);
                         proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Tar exited with code ${code}`))));
                         proc.on('error', reject);
                     });
-                } else {
-                    return reply.status(400).send({ error: 'Unsupported archive format.' });
                 }
+
+                sanitizeExtractedSymlinks(destDir);
 
                 return reply.status(200).send({ success: true, message: 'Archive extracted.' });
             }
