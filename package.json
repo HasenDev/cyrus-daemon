@@ -1,6 +1,6 @@
 {
   "name": "cyrus-daemon",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "High-performance node manager and server runtime container daemon for CyrusPanel",
   "main": "src/index.js",
   "bin": {
@@ -16,7 +16,9 @@
     "@fastify/websocket": "^11.3.0",
     "fastify": "5.12.0",
     "jsonwebtoken": "^9.0.3",
+    "mime-types": "^3.0.2",
     "node-fetch": "^2.7.0",
+    "resolve-path": "^1.4.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {
