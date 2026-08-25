@@ -2,9 +2,16 @@ const docker = require('../../../../lib/docker');
 const fs = require('fs');
 const path = require('path');
 
+const SERVER_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+
 module.exports = {
     GET: async (req, reply) => {
-        const serverId = req.params.id;
+        const serverId = req.params?.id;
+
+        if (!serverId || !SERVER_ID_REGEX.test(serverId)) {
+            return reply.status(400).send({ error: 'Invalid server identifier.' });
+        }
+
         const containerName = `cyrus_${serverId}`;
 
         try {
@@ -26,7 +33,12 @@ module.exports = {
         }
     },
     DELETE: async (req, reply) => {
-        const serverId = req.params.id;
+        const serverId = req.params?.id;
+
+        if (!serverId || !SERVER_ID_REGEX.test(serverId)) {
+            return reply.status(400).send({ error: 'Invalid server identifier.' });
+        }
+
         const containerName = `cyrus_${serverId}`;
         const volumeDir = path.join('/var/lib/cyruspanel/volumes', serverId);
 
