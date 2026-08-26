@@ -96,7 +96,7 @@ async function handlePowerSignal(serverId, action, daemonConfig) {
         const detailsEndpoint = `${panelUrl}/api/v1/daemon/servers/${serverId}/details`;
 
         const isHttps = detailsEndpoint.startsWith('https');
-        const agent = isHttps ? new https.Agent({ rejectUnauthorized: false }) : new http.Agent();
+        const agent = isHttps ? new https.Agent({ rejectUnauthorized: true }) : new http.Agent();
 
         const specRes = await fetch(detailsEndpoint, {
             headers: { 'Authorization': `Bearer ${daemonConfig.token}` },
