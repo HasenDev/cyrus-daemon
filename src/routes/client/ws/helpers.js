@@ -91,7 +91,7 @@ async function verifyWsToken(panelUrl, daemonToken, token, serverId) {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(postData)
             },
-            rejectUnauthorized: false
+            rejectUnauthorized: true
         }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
