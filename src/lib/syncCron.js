@@ -2,6 +2,8 @@ const logger = require('./logger');
 const PanelClient = require('./panelClient');
 const docker = require('./docker');
 
+let syncInterval = null;
+
 async function syncNodeContainers(config) {
     if (!config.panel_url || !config.token) return;
 
@@ -90,8 +92,19 @@ async function syncNodeContainers(config) {
 }
 
 function startSyncCron(config) {
+    if (syncInterval) {
+        clearInterval(syncInterval);
+        syncInterval = null;
+    }
     syncNodeContainers(config);
-    setInterval(() => syncNodeContainers(config), 3600000);
+    syncInterval = setInterval(() => syncNodeContainers(config), 3600000);
 }
 
-module.exports = { startSyncCron, syncNodeContainers };
+function stopSyncCron() {
+    if (syncInterval) {
+        clearInterval(syncInterval);
+        syncInterval = null;
+    }
+}
+
+module.exports = { startSyncCron, stopSyncCron, syncNodeContainers };
