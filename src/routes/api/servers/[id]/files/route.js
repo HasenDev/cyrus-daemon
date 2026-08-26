@@ -5,7 +5,9 @@ const { resolveSafePath, getFilePermissions, getMimeType, isArchiveFile } = requ
 
 function sanitizeError(err) {
     if (!err || !err.message) return 'An unexpected file error occurred.';
-    return err.message.replace(/\/var\/lib\/[^\s'"]+/g, 'target');
+    return err.message
+        .replace(/(?:\/[a-zA-Z0-9_.-]+)+/g, 'target')
+        .replace(/target(?:\s+target)+/g, 'target');
 }
 
 function getDirUsage(dir) {
@@ -100,13 +102,21 @@ function inspectTarArchive(file) {
         if (!line) continue;
 
         const parts = line.split(/\s+/);
-        if (parts.length >= 6) {
-            const sizeStr = parts[2];
-            if (/^\d+$/.test(sizeStr)) {
-                totalSize += parseInt(sizeStr, 10);
+        if (parts.length < 3) continue;
+
+        let sizeIndex = -1;
+        for (let i = 1; i < Math.min(parts.length, 5); i++) {
+            if (/^\d+$/.test(parts[i])) {
+                sizeIndex = i;
+                break;
             }
         }
 
+        if (sizeIndex !== -1) {
+            totalSize += parseInt(parts[sizeIndex], 10) || 0;
+        }
+
+        const dateIdx = sizeIndex !== -1 ? sizeIndex + 3 : 5;
         let entryPath = '';
         let linkTarget = null;
 
@@ -114,15 +124,14 @@ function inspectTarArchive(file) {
             const split = line.split(' -> ');
             linkTarget = split[1]?.trim();
             const leftParts = split[0].trim().split(/\s+/);
-            entryPath = leftParts.slice(5).join(' ');
+            entryPath = leftParts.slice(dateIdx).join(' ');
         } else if (line.includes(' link to ')) {
             const split = line.split(' link to ');
             linkTarget = split[1]?.trim();
             const leftParts = split[0].trim().split(/\s+/);
-            entryPath = leftParts.slice(5).join(' ');
+            entryPath = leftParts.slice(dateIdx).join(' ');
         } else {
-            const splitParts = parts.slice(5);
-            entryPath = splitParts.join(' ');
+            entryPath = parts.slice(dateIdx).join(' ');
         }
 
         if (entryPath) {
@@ -143,8 +152,8 @@ function inspectTarArchive(file) {
     return totalSize;
 }
 
-function sanitizeExtractedSymlinks(baseDir) {
-    const resolvedBase = path.resolve(baseDir);
+function sanitizeExtractedSymlinks(scanDir, baseBoundaryDir) {
+    const resolvedBoundary = path.resolve(baseBoundaryDir || scanDir);
 
     function walk(currentDir) {
         let entries;
@@ -170,7 +179,7 @@ function sanitizeExtractedSymlinks(baseDir) {
 
                     const resolvedTarget = path.resolve(currentDir, linkTarget);
 
-                    if (!resolvedTarget.startsWith(resolvedBase + path.sep) && resolvedTarget !== resolvedBase) {
+                    if (!resolvedTarget.startsWith(resolvedBoundary + path.sep) && resolvedTarget !== resolvedBoundary) {
                         fs.unlinkSync(fullPath);
                     }
                 } else if (lstat.isDirectory()) {
@@ -180,7 +189,7 @@ function sanitizeExtractedSymlinks(baseDir) {
         }
     }
 
-    walk(resolvedBase);
+    walk(path.resolve(scanDir));
 }
 
 module.exports = {
@@ -416,7 +425,9 @@ module.exports = {
 
                 await new Promise((resolve, reject) => {
                     const tarProc = spawn('tar', ['-czf', destArchivePath, '--', ...safeFiles], { cwd: workingDir });
-                    tarProc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Tar exited with code ${code}`))));
+                    let stderr = '';
+                    tarProc.stderr?.on('data', (d) => { stderr += d.toString(); });
+                    tarProc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `Tar exited with code ${code}`))));
                     tarProc.on('error', reject);
                 });
 
@@ -446,21 +457,44 @@ module.exports = {
                 
                 checkSpace(uncompressedSize);
 
-                if (ext === '.zip') {
-                    await new Promise((resolve, reject) => {
-                        const proc = spawn('unzip', ['-o', '-q', archivePath, '-d', destDir]);
-                        proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Unzip exited with code ${code}`))));
-                        proc.on('error', reject);
-                    });
-                } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
-                    await new Promise((resolve, reject) => {
-                        const proc = spawn('tar', ['-xf', archivePath, '--no-same-owner', '--no-same-permissions', '-C', destDir]);
-                        proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Tar exited with code ${code}`))));
-                        proc.on('error', reject);
-                    });
-                }
+                const stagingDir = path.join(destDir, `.tmp_extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+                fs.mkdirSync(stagingDir, { recursive: true, mode: 0o777 });
 
-                sanitizeExtractedSymlinks(destDir);
+                try {
+                    if (ext === '.zip') {
+                        await new Promise((resolve, reject) => {
+                            const proc = spawn('unzip', ['-o', '-q', archivePath, '-d', stagingDir]);
+                            let stderr = '';
+                            proc.stderr?.on('data', (d) => { stderr += d.toString(); });
+                            proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `Unzip exited with code ${code}`))));
+                            proc.on('error', reject);
+                        });
+                    } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
+                        await new Promise((resolve, reject) => {
+                            const proc = spawn('tar', ['-xf', archivePath, '--no-same-owner', '--no-same-permissions', '-C', stagingDir]);
+                            let stderr = '';
+                            proc.stderr?.on('data', (d) => { stderr += d.toString(); });
+                            proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `Tar exited with code ${code}`))));
+                            proc.on('error', reject);
+                        });
+                    }
+
+                    sanitizeExtractedSymlinks(stagingDir, destDir);
+
+                    const extractedItems = fs.readdirSync(stagingDir);
+                    for (const item of extractedItems) {
+                        const srcPath = path.join(stagingDir, item);
+                        const dstPath = path.join(destDir, item);
+                        if (fs.existsSync(dstPath)) {
+                            fs.rmSync(dstPath, { recursive: true, force: true });
+                        }
+                        fs.renameSync(srcPath, dstPath);
+                    }
+                } finally {
+                    if (fs.existsSync(stagingDir)) {
+                        fs.rmSync(stagingDir, { recursive: true, force: true });
+                    }
+                }
 
                 return reply.status(200).send({ success: true, message: 'Archive extracted.' });
             }
