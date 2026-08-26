@@ -2,7 +2,7 @@ const fs = require('fs');
 const https = require('https');
 const crypto = require('crypto');
 const readline = require('readline');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { URL } = require('url');
 const logger = require('../lib/logger');
 const daemonInfo = require('../lib/daemonInformation');
@@ -170,14 +170,14 @@ function verifyChecksum(actualHash, expectedHash) {
 function checkSystemdServiceExists(serviceName = 'cyrus-daemon') {
     if (process.platform !== 'linux') return false;
     try {
-        const output = execSync(`systemctl list-unit-files ${serviceName}.service`, {
+        const output = execFileSync('systemctl', ['list-unit-files', `${serviceName}.service`], {
             stdio: ['pipe', 'pipe', 'ignore'],
             encoding: 'utf8'
         });
         return output.includes(`${serviceName}.service`);
     } catch {
         try {
-            execSync(`systemctl status ${serviceName}`, {
+            execFileSync('systemctl', ['status', serviceName], {
                 stdio: ['pipe', 'pipe', 'ignore'],
                 encoding: 'utf8'
             });
@@ -308,7 +308,7 @@ async function updateCommand(args = []) {
         if (answer.toLowerCase() === '' || answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
             try {
                 logger.info('Restarting cyrus-daemon service...');
-                execSync('systemctl restart cyrus-daemon', { stdio: 'inherit' });
+                execFileSync('systemctl', ['restart', 'cyrus-daemon'], { stdio: 'inherit' });
                 logger.success('cyrus-daemon service restarted successfully.');
                 logger.info('Zero downtime: Running containers remain unaffected in the background.');
             } catch (err) {
