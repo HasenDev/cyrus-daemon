@@ -211,14 +211,38 @@ module.exports = {
                 const { targetPath } = resolveSafePath(serverId, filePath);
                 if (!fs.existsSync(targetPath)) return reply.status(404).send({ error: 'File not found.' });
 
-                const stat = fs.statSync(targetPath);
-                if (stat.isDirectory()) return reply.status(400).send({ error: 'Target is a directory, not a file.' });
+                let fd;
+                let stat;
+                let content;
 
-                if (stat.size > 5 * 1024 * 1024) {
-                    return reply.status(400).send({ error: 'File exceeds editable size limit (5 MB).' });
+                try {
+                    fd = fs.openSync(targetPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+                    stat = fs.fstatSync(fd);
+
+                    if (stat.isDirectory()) {
+                        fs.closeSync(fd);
+                        return reply.status(400).send({ error: 'Target is a directory, not a file.' });
+                    }
+
+                    if (stat.size > 5 * 1024 * 1024) {
+                        fs.closeSync(fd);
+                        return reply.status(400).send({ error: 'File exceeds editable size limit (5 MB).' });
+                    }
+
+                    const buffer = Buffer.alloc(stat.size);
+                    fs.readSync(fd, buffer, 0, stat.size, 0);
+                    fs.closeSync(fd);
+                    content = buffer.toString('utf8');
+                } catch (err) {
+                    if (fd !== undefined) {
+                        try { fs.closeSync(fd); } catch (_) {}
+                    }
+                    if (err.code === 'ELOOP' || err.code === 'SYMLINK_LOOP') {
+                        return reply.status(400).send({ error: 'Access denied: Symbolic links are not permitted.' });
+                    }
+                    throw err;
                 }
 
-                const content = fs.readFileSync(targetPath, 'utf8');
                 return reply.status(200).send({ content, size: stat.size, name: path.basename(targetPath) });
             }
 
@@ -287,14 +311,38 @@ module.exports = {
                 const { targetPath } = resolveSafePath(serverId, file);
 
                 let existingSize = 0;
-                if (fs.existsSync(targetPath)) existingSize = fs.statSync(targetPath).size;
+                if (fs.existsSync(targetPath)) {
+                    try {
+                        const lstat = fs.lstatSync(targetPath);
+                        if (lstat.isSymbolicLink()) {
+                            return reply.status(400).send({ error: 'Access denied: Symbolic links are not permitted.' });
+                        }
+                        existingSize = lstat.size;
+                    } catch (_) {}
+                }
+
                 const newSize = Buffer.byteLength(content || '', 'utf8');
                 checkSpace(newSize - existingSize);
 
                 const parentDir = path.dirname(targetPath);
                 if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true, mode: 0o777 });
 
-                fs.writeFileSync(targetPath, content || '', 'utf8');
+                let fd;
+                try {
+                    fd = fs.openSync(targetPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o666);
+                    const buffer = Buffer.from(content || '', 'utf8');
+                    fs.writeSync(fd, buffer, 0, buffer.length, 0);
+                    fs.closeSync(fd);
+                } catch (err) {
+                    if (fd !== undefined) {
+                        try { fs.closeSync(fd); } catch (_) {}
+                    }
+                    if (err.code === 'ELOOP' || err.code === 'SYMLINK_LOOP') {
+                        return reply.status(400).send({ error: 'Access denied: Symbolic links are not permitted.' });
+                    }
+                    throw err;
+                }
+
                 return reply.status(200).send({ success: true, message: 'File saved successfully.' });
             }
 
@@ -357,10 +405,15 @@ module.exports = {
                 const { targetPath: sourcePath } = resolveSafePath(serverId, path.join(root, file));
                 if (!fs.existsSync(sourcePath)) return reply.status(404).send({ error: 'Source file does not exist.' });
 
-                const stat = fs.statSync(sourcePath);
-                if (stat.isDirectory()) return reply.status(400).send({ error: 'Directories cannot be copied directly.' });
+                const lstat = fs.lstatSync(sourcePath);
+                if (lstat.isSymbolicLink()) {
+                    return reply.status(400).send({ error: 'Access denied: Symbolic links cannot be copied.' });
+                }
+                if (lstat.isDirectory()) {
+                    return reply.status(400).send({ error: 'Directories cannot be copied directly.' });
+                }
 
-                checkSpace(stat.size);
+                checkSpace(lstat.size);
 
                 const parsed = path.parse(sourcePath);
                 const copyName = `${parsed.name} copy${parsed.ext}`;
@@ -372,12 +425,27 @@ module.exports = {
 
             if (action === 'chmod') {
                 const { file, mode, root = '/' } = req.body;
-                if (!file || !mode) return reply.status(400).send({ error: 'File and mode are required.' });
+                if (!file || mode === undefined || mode === null) return reply.status(400).send({ error: 'File and mode are required.' });
 
                 const { targetPath } = resolveSafePath(serverId, path.join(root, file));
                 if (!fs.existsSync(targetPath)) return reply.status(404).send({ error: 'Target does not exist.' });
 
-                fs.chmodSync(targetPath, parseInt(mode.toString(), 8));
+                const lstat = fs.lstatSync(targetPath);
+                if (lstat.isSymbolicLink()) {
+                    return reply.status(400).send({ error: 'Access denied: Modifying permissions of symbolic links is not permitted.' });
+                }
+
+                const modeStr = String(mode).trim();
+                if (!/^[0-7]{3,4}$/.test(modeStr)) {
+                    return reply.status(400).send({ error: 'Invalid file mode format. Must be an octal permission.' });
+                }
+
+                const parsedMode = parseInt(modeStr, 8);
+                if (isNaN(parsedMode) || parsedMode < 0 || parsedMode > 0o777 || (parsedMode & 0o7000) !== 0) {
+                    return reply.status(400).send({ error: 'Invalid file mode.' });
+                }
+
+                fs.chmodSync(targetPath, parsedMode);
                 return reply.status(200).send({ success: true, message: 'Permissions updated successfully.' });
             }
 
