@@ -90,7 +90,7 @@ async function getTrustedDiskLimit(serverId, daemonConfig) {
     if (panelUrl) {
         const detailsEndpoint = `${panelUrl}/api/v1/daemon/servers/${serverId}/details`;
         const isHttps = detailsEndpoint.startsWith('https');
-        const agent = isHttps ? new https.Agent({ rejectUnauthorized: false }) : new http.Agent();
+        const agent = isHttps ? new https.Agent({ rejectUnauthorized: true }) : new http.Agent();
 
         try {
             const controller = new AbortController();
