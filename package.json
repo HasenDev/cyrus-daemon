@@ -1,6 +1,6 @@
 {
   "name": "cyrus-daemon",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "High-performance node manager and server runtime container daemon for CyrusPanel",
   "main": "src/index.js",
   "bin": {
