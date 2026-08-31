@@ -3,6 +3,55 @@ const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const { resolveSafePath, getFilePermissions, getMimeType, isArchiveFile } = require('../../../../../lib/files');
 
+let Archive;
+try {
+    const lib = require('libarchive.js');
+    Archive = lib.Archive || lib;
+} catch {
+    try {
+        const lib = require('libarchive.js/main.js');
+        Archive = lib.Archive || lib;
+    } catch {}
+}
+
+async function getArchiveClass() {
+    if (Archive) return Archive;
+    try {
+        const lib = await import('libarchive.js');
+        Archive = lib.Archive || lib.default?.Archive || lib.default || lib;
+        return Archive;
+    } catch {
+        try {
+            const lib = await import('libarchive.js/main.js');
+            Archive = lib.Archive || lib.default?.Archive || lib.default || lib;
+            return Archive;
+        } catch {
+            return null;
+        }
+    }
+}
+
+function isCommandAvailable(cmd) {
+    try {
+        const checkTool = process.platform === 'win32' ? 'where' : 'which';
+        execFileSync(checkTool, [cmd], { stdio: 'ignore' });
+        return true;
+    } catch {
+        try {
+            execFileSync(cmd, ['--version'], { stdio: 'ignore' });
+            return true;
+        } catch (err) {
+            return err && err.code !== 'ENOENT';
+        }
+    }
+}
+
+function assertCommandInstalled(cmd) {
+    if (!isCommandAvailable(cmd)) {
+        throw new Error(`The '${cmd}' utility is not installed in the environment. Please contact an administrator about it.`);
+    }
+}
+
 function sanitizeError(err) {
     if (!err || !err.message) return 'An unexpected file error occurred.';
     return err.message
@@ -19,16 +68,42 @@ function getDirUsage(dir) {
     }
 }
 
+async function inspectWithLibarchive(file) {
+    const ArchiveClass = await getArchiveClass();
+    if (!ArchiveClass) return null;
+    if (typeof ArchiveClass.init === 'function') {
+        try {
+            ArchiveClass.init();
+        } catch {}
+    }
+    const buffer = fs.readFileSync(file);
+    const blob = typeof Blob !== 'undefined' ? new Blob([buffer]) : buffer;
+    const archive = await ArchiveClass.open(blob);
+    return await archive.getFilesArray();
+}
+
 function inspectZipArchive(file) {
+    assertCommandInstalled('unzip');
     let out = '';
     try {
         out = execFileSync('unzip', ['-Z', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
-    } catch {
-        out = execFileSync('unzip', ['-l', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    } catch (err) {
+        if (err && err.code === 'ENOENT') {
+            throw new Error("The 'unzip' utility is not installed in the environment. Please contact an administrator about it.");
+        }
+        try {
+            out = execFileSync('unzip', ['-l', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+        } catch (innerErr) {
+            if (innerErr && innerErr.code === 'ENOENT') {
+                throw new Error("The 'unzip' utility is not installed in the environment. Please contact an administrator about it.");
+            }
+            throw innerErr;
+        }
     }
 
     const lines = out.split('\n');
     let totalSize = 0;
+    let entryCount = 0;
 
     for (const rawLine of lines) {
         const line = rawLine.trim();
@@ -45,10 +120,19 @@ function inspectZipArchive(file) {
 
         const parts = line.split(/\s+/);
         if (parts.length >= 8 && /^[ld\-?cbps][rwx\-stST]{9}/.test(parts[0])) {
+            entryCount++;
+            if (entryCount > 10000) {
+                throw new Error('Archive contains too many entries (possible zip bomb).');
+            }
+
             const isSymlink = parts[0].startsWith('l');
             const sizeStr = parts[3];
             if (/^\d+$/.test(sizeStr)) {
                 totalSize += parseInt(sizeStr, 10);
+            }
+
+            if (totalSize > 1024 * 1024 * 1024) {
+                throw new Error('Archive uncompressed size exceeds maximum allowed limit (1 GB).');
             }
 
             let entryPath = '';
@@ -65,24 +149,34 @@ function inspectZipArchive(file) {
 
             if (entryPath) {
                 const normalized = path.posix.normalize(entryPath.replace(/\\/g, '/'));
-                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized)) {
+                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized) || normalized.includes('\0')) {
                     throw new Error(`Unsafe entry path in archive: ${entryPath}`);
                 }
             }
 
             if (isSymlink && linkTarget) {
                 const normalizedTarget = path.posix.normalize(linkTarget.replace(/\\/g, '/'));
-                if (normalizedTarget.startsWith('..') || normalizedTarget.startsWith('/') || path.isAbsolute(normalizedTarget)) {
+                if (normalizedTarget.startsWith('..') || normalizedTarget.startsWith('/') || path.isAbsolute(normalizedTarget) || normalizedTarget.includes('\0')) {
                     throw new Error(`Unsafe symlink target in archive: ${linkTarget}`);
                 }
             }
         } else if (parts.length >= 4 && /^\d+$/.test(parts[0])) {
+            entryCount++;
+            if (entryCount > 10000) {
+                throw new Error('Archive contains too many entries (possible zip bomb).');
+            }
+
             const sizeStr = parts[0];
             totalSize += parseInt(sizeStr, 10);
+
+            if (totalSize > 1024 * 1024 * 1024) {
+                throw new Error('Archive uncompressed size exceeds maximum allowed limit (1 GB).');
+            }
+
             const entryPath = parts.slice(3).join(' ');
             if (entryPath) {
                 const normalized = path.posix.normalize(entryPath.replace(/\\/g, '/'));
-                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized)) {
+                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized) || normalized.includes('\0')) {
                     throw new Error(`Unsafe entry path in archive: ${entryPath}`);
                 }
             }
@@ -93,8 +187,19 @@ function inspectZipArchive(file) {
 }
 
 function inspectTarArchive(file) {
-    const out = execFileSync('tar', ['-tvf', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    assertCommandInstalled('tar');
+    let out = '';
+    try {
+        out = execFileSync('tar', ['-tvf', file], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    } catch (err) {
+        if (err && err.code === 'ENOENT') {
+            throw new Error("The 'tar' utility is not installed in the environment. Please contact an administrator about it.");
+        }
+        throw err;
+    }
+
     let totalSize = 0;
+    let entryCount = 0;
     const lines = out.split('\n');
 
     for (const rawLine of lines) {
@@ -103,6 +208,11 @@ function inspectTarArchive(file) {
 
         const parts = line.split(/\s+/);
         if (parts.length < 3) continue;
+
+        entryCount++;
+        if (entryCount > 10000) {
+            throw new Error('Archive contains too many entries (possible zip bomb).');
+        }
 
         let sizeIndex = -1;
         for (let i = 1; i < Math.min(parts.length, 5); i++) {
@@ -114,6 +224,10 @@ function inspectTarArchive(file) {
 
         if (sizeIndex !== -1) {
             totalSize += parseInt(parts[sizeIndex], 10) || 0;
+        }
+
+        if (totalSize > 1024 * 1024 * 1024) {
+            throw new Error('Archive uncompressed size exceeds maximum allowed limit (1 GB).');
         }
 
         const dateIdx = sizeIndex !== -1 ? sizeIndex + 3 : 5;
@@ -136,20 +250,159 @@ function inspectTarArchive(file) {
 
         if (entryPath) {
             const normalized = path.posix.normalize(entryPath.replace(/\\/g, '/'));
-            if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized)) {
+            if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized) || normalized.includes('\0')) {
                 throw new Error(`Unsafe entry path in archive: ${entryPath}`);
             }
         }
 
         if (linkTarget) {
             const normalizedTarget = path.posix.normalize(linkTarget.replace(/\\/g, '/'));
-            if (normalizedTarget.startsWith('..') || normalizedTarget.startsWith('/') || path.isAbsolute(normalizedTarget)) {
+            if (normalizedTarget.startsWith('..') || normalizedTarget.startsWith('/') || path.isAbsolute(normalizedTarget) || normalizedTarget.includes('\0')) {
                 throw new Error(`Unsafe symlink target in archive: ${linkTarget}`);
             }
         }
     }
 
     return totalSize;
+}
+
+async function inspectArchive(file) {
+    const MAX_ARCHIVE_SIZE = 1024 * 1024 * 1024;
+    const MAX_FILES = 10000;
+    const MAX_RATIO = 100;
+
+    const stat = fs.statSync(file);
+    const compressedSize = stat.size;
+
+    let entries = null;
+    try {
+        entries = await inspectWithLibarchive(file);
+    } catch (err) {
+        if (err && err.message && (err.message.includes('Unsafe entry') || err.message.includes('exceeds maximum') || err.message.includes('zip bomb') || err.message.includes('not installed'))) {
+            throw err;
+        }
+    }
+
+    if (Array.isArray(entries)) {
+        if (entries.length > MAX_FILES) {
+            throw new Error('Archive contains too many entries (possible zip bomb).');
+        }
+
+        let totalSize = 0;
+        for (const entry of entries) {
+            const entryName = entry.file?.name || '';
+            const entryDir = entry.path || '';
+            const fullPath = path.posix.join(entryDir, entryName);
+
+            if (fullPath) {
+                const normalized = path.posix.normalize(fullPath.replace(/\\/g, '/'));
+                if (normalized.startsWith('..') || normalized.startsWith('/') || path.isAbsolute(normalized) || normalized.includes('\0')) {
+                    throw new Error(`Unsafe entry path in archive: ${fullPath}`);
+                }
+            }
+
+            const size = Number(entry.file?.size) || 0;
+            if (size < 0) {
+                throw new Error('Invalid entry size in archive.');
+            }
+            totalSize += size;
+
+            if (totalSize > MAX_ARCHIVE_SIZE) {
+                throw new Error('Archive uncompressed size exceeds maximum allowed limit (1 GB).');
+            }
+        }
+
+        if (compressedSize > 0 && totalSize > 10 * 1024 * 1024 && (totalSize / compressedSize) > MAX_RATIO) {
+            throw new Error('Archive compression ratio too high (possible zip bomb).');
+        }
+
+        return totalSize;
+    }
+
+    const ext = path.extname(file).toLowerCase();
+    let totalSize = 0;
+    if (ext === '.zip') {
+        totalSize = inspectZipArchive(file);
+    } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
+        totalSize = inspectTarArchive(file);
+    } else {
+        throw new Error('Unsupported archive format.');
+    }
+
+    if (totalSize > MAX_ARCHIVE_SIZE) {
+        throw new Error('Archive uncompressed size exceeds maximum allowed limit (1 GB).');
+    }
+
+    if (compressedSize > 0 && totalSize > 10 * 1024 * 1024 && (totalSize / compressedSize) > MAX_RATIO) {
+        throw new Error('Archive compression ratio too high (possible zip bomb).');
+    }
+
+    return totalSize;
+}
+
+async function runMonitoredExtraction(cmd, args, stagingDir, maxAllowedBytes) {
+    assertCommandInstalled(cmd);
+    const MAX_SPEED = 20 * 1024 * 1024;
+    const startTime = Date.now();
+    let killed = false;
+    let killReason = '';
+
+    const proc = spawn(cmd, args);
+    let stderr = '';
+    proc.stderr?.on('data', (d) => { stderr += d.toString(); });
+
+    const monitorInterval = setInterval(() => {
+        try {
+            if (fs.existsSync(stagingDir)) {
+                const currentUsage = getDirUsage(stagingDir);
+                if (currentUsage > maxAllowedBytes) {
+                    killed = true;
+                    killReason = 'Archive extraction exceeded allowed size limit or server storage quota (possible zip bomb).';
+                    proc.kill('SIGKILL');
+                    clearInterval(monitorInterval);
+                }
+            }
+        } catch {}
+    }, 100);
+
+    try {
+        await new Promise((resolve, reject) => {
+            proc.on('close', (code) => {
+                clearInterval(monitorInterval);
+                if (killed) {
+                    return reject(new Error(killReason));
+                }
+                if (code === 0) {
+                    return resolve();
+                }
+                return reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`));
+            });
+            proc.on('error', (err) => {
+                clearInterval(monitorInterval);
+                if (err && err.code === 'ENOENT') {
+                    reject(new Error(`The '${cmd}' utility is not installed in the environment. Please contact an administrator about it.`));
+                } else {
+                    reject(err);
+                }
+            });
+        });
+    } finally {
+        clearInterval(monitorInterval);
+    }
+
+    const elapsedMs = Date.now() - startTime;
+    const finalSize = getDirUsage(stagingDir);
+    if (finalSize > maxAllowedBytes) {
+        throw new Error('Archive extraction exceeded allowed size limit or server storage quota (possible zip bomb).');
+    }
+
+    const minExpectedMs = (finalSize / MAX_SPEED) * 1000;
+    if (minExpectedMs > elapsedMs) {
+        const delayNeeded = Math.min(minExpectedMs - elapsedMs, 10000);
+        if (delayNeeded > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delayNeeded));
+        }
+    }
 }
 
 function sanitizeExtractedSymlinks(scanDir, baseBoundaryDir) {
@@ -459,6 +712,7 @@ module.exports = {
                     return reply.status(400).send({ error: 'Invalid archive name.' });
                 }
 
+                assertCommandInstalled('tar');
                 checkSpace(0);
 
                 const { targetPath: destArchivePath } = resolveSafePath(serverId, path.join(root, name));
@@ -496,7 +750,13 @@ module.exports = {
                     let stderr = '';
                     tarProc.stderr?.on('data', (d) => { stderr += d.toString(); });
                     tarProc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `Tar exited with code ${code}`))));
-                    tarProc.on('error', reject);
+                    tarProc.on('error', (err) => {
+                        if (err && err.code === 'ENOENT') {
+                            reject(new Error("The 'tar' utility is not installed in the environment. Please contact an administrator about it."));
+                        } else {
+                            reject(err);
+                        }
+                    });
                 });
 
                 return reply.status(200).send({ success: true, message: 'Archive created.', archiveName: name });
@@ -513,38 +773,38 @@ module.exports = {
                 if (!fs.existsSync(destDir)) return reply.status(404).send({ error: 'Destination directory does not exist.' });
 
                 const ext = path.extname(file).toLowerCase();
-                let uncompressedSize = 0;
-                
-                if (ext === '.zip') {
-                    uncompressedSize = inspectZipArchive(archivePath);
-                } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
-                    uncompressedSize = inspectTarArchive(archivePath);
-                } else {
+                const isZip = ext === '.zip';
+                const isTar = file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar' || file.endsWith('.tar.bz2') || ext === '.tbz2' || file.endsWith('.tar.xz') || ext === '.txz';
+
+                if (!isZip && !isTar) {
                     return reply.status(400).send({ error: 'Unsupported archive format.' });
                 }
-                
+
+                if (isZip) {
+                    assertCommandInstalled('unzip');
+                } else if (isTar) {
+                    assertCommandInstalled('tar');
+                }
+
+                const uncompressedSize = await inspectArchive(archivePath);
+
                 checkSpace(uncompressedSize);
+
+                const MAX_ARCHIVE_LIMIT = 1024 * 1024 * 1024;
+                let maxAllowedBytes = MAX_ARCHIVE_LIMIT;
+                if (maxBytes > 0) {
+                    const remainingQuota = Math.max(0, maxBytes - currentUsageBytes);
+                    maxAllowedBytes = Math.min(MAX_ARCHIVE_LIMIT, remainingQuota);
+                }
 
                 const stagingDir = path.join(destDir, `.tmp_extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
                 fs.mkdirSync(stagingDir, { recursive: true, mode: 0o777 });
 
                 try {
-                    if (ext === '.zip') {
-                        await new Promise((resolve, reject) => {
-                            const proc = spawn('unzip', ['-o', '-q', archivePath, '-d', stagingDir]);
-                            let stderr = '';
-                            proc.stderr?.on('data', (d) => { stderr += d.toString(); });
-                            proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `Unzip exited with code ${code}`))));
-                            proc.on('error', reject);
-                        });
-                    } else if (file.endsWith('.tar.gz') || ext === '.tgz' || ext === '.tar') {
-                        await new Promise((resolve, reject) => {
-                            const proc = spawn('tar', ['-xf', archivePath, '--no-same-owner', '--no-same-permissions', '-C', stagingDir]);
-                            let stderr = '';
-                            proc.stderr?.on('data', (d) => { stderr += d.toString(); });
-                            proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `Tar exited with code ${code}`))));
-                            proc.on('error', reject);
-                        });
+                    if (isZip) {
+                        await runMonitoredExtraction('unzip', ['-o', '-q', archivePath, '-d', stagingDir], stagingDir, maxAllowedBytes);
+                    } else if (isTar) {
+                        await runMonitoredExtraction('tar', ['-xf', archivePath, '--no-same-owner', '--no-same-permissions', '-C', stagingDir], stagingDir, maxAllowedBytes);
                     }
 
                     sanitizeExtractedSymlinks(stagingDir, destDir);
