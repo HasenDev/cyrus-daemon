@@ -8,11 +8,48 @@
 
 ## Setting up the environment
 
-Cyrus Panel Daemon requires **Node.js v21 or newer**.
+Cyrus Panel Daemon requires **Node.js v21 or newer** as well as system utilities for archive and compression management.
 
 **Node.js v24.19.0 is the currently tested version**, but it is not required.
 
-### Install with NVM
+### Required System Dependencies
+
+The daemon relies on `unzip` and `tar` utilities to extract, inspect, and package server archives safely. Install them based on your Linux distribution:
+
+**Debian / Ubuntu**
+
+```bash
+sudo apt update
+sudo apt install -y unzip tar
+```
+
+**Fedora / RHEL / Rocky / AlmaLinux**
+
+```bash
+sudo dnf install -y unzip tar
+```
+
+**Arch Linux**
+
+```bash
+sudo pacman -S unzip tar
+```
+
+**Alpine Linux**
+
+```bash
+apk add unzip tar
+```
+
+**openSUSE**
+
+```bash
+sudo zypper install -y unzip tar
+```
+
+---
+
+### Install Node.js with NVM
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
@@ -21,7 +58,7 @@ nvm install 24.19.0
 nvm use 24.19.0
 ```
 
-### Or install using your Linux distribution
+### Or install Node.js using your Linux distribution
 
 **Debian / Ubuntu**
 
